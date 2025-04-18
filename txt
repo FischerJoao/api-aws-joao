@@ -1,0 +1,19 @@
+ssh -i labsuser.pem ubuntu@ec2-3-95-176-242.compute-1.amazonaws.com
+chmod 400 labsuser.pem
+
+curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | sudo gpg --dearmor -o/usr/share/keyrings/mongodb-archive-keyring.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/mongodb-archive-keyring.gpg] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+
+db.createUser({
+ user: "seuUsuario",
+ pwd: "suaSenha",
+ roles: [ { role: "userAdminAnyDatabase", db: "admin" }, "readWriteAnyDatabase"
+]
+})
+
+mongosh -u seuUsuario -p suaSenha --authenticationDatabase admin
+
+ssh -i labsuser.pem ec2-user@3.90.206.188
+
+curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -
