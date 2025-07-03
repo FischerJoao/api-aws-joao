@@ -1,8 +1,7 @@
 require('dotenv').config();
 const express = require('express');
+const mysql = require('mysql2');
 const app = express();
-// Multer para upload de arquivos
-const multer = require('multer');
 //BD
 const mongoose = require('mongoose');
 //swagger
@@ -12,47 +11,21 @@ const AWS = require('aws-sdk');
 
 //Log
 const { logInfo, logError } = require('./logger');
-const mysql = require('mysql2/promise');
-// Adicione antes das rotas
-app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE');
-    res.header('Access-Control-Allow-Headers', 'Content-Type');
-    next();
-});
-
-// Configuração do pool MySQL com tratamento de erro
-const pool = mysql.createPool({
-    host: process.env.CNN_MYSQL_DB_HOST.replace(/"/g, ''),
-    user: process.env.CNN_MYSQL_DB_USER,
-    password: process.env.CNN_MYSQL_DB_PASSWORD,
-    database: process.env.CNN_MYSQL_DB_NAME,
-    port: process.env.CNN_MYSQL_DB_PORT,
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
-});
-
-// Testar conexão MySQL na inicialização
-async function testMySQLConnection() {
-    try {
-        const connection = await pool.getConnection();
-        console.log('✅ MySQL conectado com sucesso');
-        connection.release();
-    } catch (error) {
-        console.error('❌ Erro ao conectar ao MySQL:', error.message);
-    }
-}
 
 app.use(express.json());
 
-// Configuração do multer para armazenar arquivos em memória
-const upload = multer({ 
-    storage: multer.memoryStorage(),
-    limits: {
-        fileSize: 50 * 1024 * 1024, // Limite de 50MB
-    }
-});
+const pool = mysql.createPool({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  port: process.env.DB_PORT,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+  multipleStatements: true
+}).promise();
+
+const DB_NAME = process.env.DB_NAME;
 
 /**
 * @swagger
@@ -63,29 +36,17 @@ const upload = multer({
 *     description: Operações de Listar buckets, upload e remoção de arquivo para um bucket S3.
 */
 
-/**
- * @swagger
- * tags:
- *   - name: CRUD MySQL
- *     description: Operações de CRUD para produtos no MySQL.
- */
 
 //#region CRUD MongoDb
-// Conexão MongoDB com tratamento de erro melhorado
 mongoose.connect(process.env.MONGO_URI, {
     useNewUrlParser: true,
     useUnifiedTopology: true,
-}).then(() => {
-    logInfo('MongoDB conectado', null);
-    console.log('✅ MongoDB conectado com sucesso');
-}).catch(err => {
-    logError('Erro ao conectar MongoDB: ' + err, null, err);
-    console.error('❌ Erro ao conectar ao MongoDB:', err.message);
-});
+}).then(() => logInfo('MongoDB conectado', null))
+    .catch(err => logError('Erro ao logar mongodb' + err, null, err));
 
 const UserSchema = new mongoose.Schema({
-    nome: { type: String, required: true },
-    email: { type: String, required: true }
+    nome: String,
+    email: String
 });
 
 const User = mongoose.model('Usuario', UserSchema);
@@ -106,16 +67,10 @@ const User = mongoose.model('Usuario', UserSchema);
  */
 app.get('/mongodb/testar-conexao', async (req, res) => {
     try {
-        // Verifica se a conexão já está estabelecida
-        if (mongoose.connection.readyState !== 1) {
-            await mongoose.connect(process.env.MONGO_URI, { 
-                useNewUrlParser: true, 
-                useUnifiedTopology: true 
-            });
-        }
-        
-        const user = await User.findOne();
-        
+        //Tentando conectar ao MongoDB
+        await mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
+        const user = await User.findOne(); //Consulta simples (primeiro usuário encontrado)
+
         logInfo('Conexão com o MongoDB efetuada com sucesso', req);
 
         if (user) {
@@ -124,11 +79,10 @@ app.get('/mongodb/testar-conexao', async (req, res) => {
             res.status(200).send('Conexão com o MongoDB bem-sucedida, mas nenhum usuário encontrado.');
         }
     } catch (error) {
-        logError('Erro ao conectar no MongoDb: ' + error, req, error);
-        res.status(500).json({ 
-            error: 'Erro na conexão com o MongoDB',
-            message: error.message 
-        });
+        await logError('Erro ao conectar no MongoDb' + error, req, error);
+        res.status(500).send('Erro na conexão com o MongoDB');
+    } finally {
+        mongoose.connection.close();
     }
 });
 
@@ -147,14 +101,14 @@ app.get('/mongodb/testar-conexao', async (req, res) => {
  *           schema:
  *             type: object
  *             properties:
- *               nome:
+ *               name:
  *                 type: string
  *                 description: Nome do usuário
  *               email:
  *                 type: string
  *                 description: Email do usuário
  *             required:
- *               - nome
+ *               - name
  *               - email
  *     responses:
  *       201:
@@ -167,7 +121,7 @@ app.get('/mongodb/testar-conexao', async (req, res) => {
  *                 _id:
  *                   type: string
  *                   description: ID do usuário
- *                 nome:
+ *                 name:
  *                   type: string
  *                 email:
  *                   type: string
@@ -176,26 +130,13 @@ app.get('/mongodb/testar-conexao', async (req, res) => {
  */
 app.post('/usuarios', async (req, res) => {
     try {
-        const { nome, email } = req.body;
-        
-        // Validação básica
-        if (!nome || !email) {
-            return res.status(400).json({ 
-                error: 'Nome e email são obrigatórios' 
-            });
-        }
-
-        const user = new User({ nome, email });
+        const user = new User(req.body);
         await user.save();
-        
         logInfo('Usuário criado', req);
-        res.status(201).json(user);
+        res.status(201).send(user);
     } catch (error) {
         logError("Erro ao criar usuário", req, error);
-        res.status(500).json({ 
-            error: 'Erro ao criar usuário',
-            message: error.message 
-        });
+        res.status(500).send('Ocorreu um erro interno');
     }
 });
 
@@ -228,14 +169,12 @@ app.get('/usuarios', async (req, res) => {
     try {
         const users = await User.find();
         logInfo('Usuários encontrados', req, users);
-        res.status(200).json(users);
+        res.send(users);
     } catch (error) {
         logError("Erro ao buscar usuários", req, error);
-        res.status(500).json({ 
-            error: 'Erro ao buscar usuários',
-            message: error.message 
-        });
+        res.status(500).send('Ocorreu um erro interno');
     }
+
 });
 
 /**
@@ -273,19 +212,15 @@ app.get('/usuarios', async (req, res) => {
 app.get('/usuarios/:id', async (req, res) => {
     try {
         const user = await User.findById(req.params.id);
-        if (!user) {
-            return res.status(404).json({ error: 'Usuário não encontrado' });
-        }
+        if (!user) return res.status(404).send('Usuário não encontrado');
 
         logInfo('Usuário encontrado', req, user);
-        res.status(200).json(user);
+        res.send(user);
     } catch (error) {
         logError("Erro ao buscar usuário", req, error);
-        res.status(500).json({ 
-            error: 'Erro ao buscar usuário',
-            message: error.message 
-        });
+        res.status(500).send('Ocorreu um erro interno');
     }
+
 });
 
 /**
@@ -334,18 +269,13 @@ app.get('/usuarios/:id', async (req, res) => {
 app.put('/usuarios/:id', async (req, res) => {
     try {
         const user = await User.findByIdAndUpdate(req.params.id, req.body, { new: true });
-        if (!user) {
-            return res.status(404).json({ error: 'Usuário não encontrado' });
-        }
+        if (!user) return res.status(404).send('Usuário não encontrado');
 
         logInfo('Usuário atualizado', req, user);
-        res.status(200).json(user);
+        res.send(user);
     } catch (error) {
         logError("Erro ao atualizar usuário", req, error);
-        res.status(500).json({ 
-            error: 'Erro ao atualizar usuário',
-            message: error.message 
-        });
+        res.status(500).send('Ocorreu um erro interno');
     }
 });
 
@@ -385,18 +315,16 @@ app.delete('/usuarios/:id', async (req, res) => {
     try {
         const result = await User.deleteOne({ _id: req.params.id });
         if (result.deletedCount === 0) {
-            return res.status(404).json({ error: 'Usuário não encontrado' });
+            return res.status(404).send('Usuário não encontrado');
         }
 
         logInfo('Usuário removido', req);
-        res.status(200).json({ message: 'Usuário removido com sucesso' });
+        res.send({ message: 'Usuário removido com sucesso' });
     } catch (error) {
-        logError("Erro ao remover usuário", req, error);
-        res.status(500).json({ 
-            error: 'Erro ao remover usuário',
-            message: error.message 
-        });
+        logError("Erro ao remover usuário", req, error)
+        res.status(500).send('Ocorreu um erro interno');
     }
+
 });
 //#endregion
 
@@ -428,7 +356,7 @@ app.get('/buckets', async (req, res) => {
         res.status(200).json(data.Buckets);
     } catch (error) {
         logError("Erro ao buscar buckets", req, error);
-        res.status(500).json({ error: 'Erro ao listar buckets', details: error.message });
+        res.status(500).json({ error: 'Erro ao listar buckets', details: error });
     }
 });
 
@@ -460,7 +388,7 @@ app.get('/buckets/:bucketName', async (req, res) => {
         res.status(200).json(data.Contents);
     } catch (error) {
         logError("Erro ao buscar objetos", req, error);
-        res.status(500).json({ error: 'Erro ao listar objetos do bucket', details: error.message });
+        res.status(500).json({ error: 'Erro ao listar objetos do bucket', details: error });
     }
 });
 
@@ -486,67 +414,16 @@ app.get('/buckets/:bucketName', async (req, res) => {
  *               file:
  *                 type: string
  *                 format: binary
- *                 description: Arquivo a ser enviado
- *               fileName:
- *                 type: string
- *                 description: Nome personalizado para o arquivo (opcional)
  *     responses:
  *       200:
  *         description: Arquivo enviado com sucesso
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 message:
- *                   type: string
- *                 fileName:
- *                   type: string
- *                 location:
- *                   type: string
- *       400:
- *         description: Nenhum arquivo fornecido
- *       500:
- *         description: Erro interno do servidor
  */
-app.post('/buckets/:bucketName/upload', upload.single('file'), async (req, res) => {
+//Utilizar alguma lib para fazer o upload/strem de arquivos, sugestão: multer
+app.post('/buckets/:bucketName/upload', async (req, res) => {
     try {
-        const { bucketName } = req.params;
-        
-        if (!req.file) {
-            return res.status(400).json({ error: 'Nenhum arquivo fornecido' });
-        }
-
-        // Usar o nome personalizado se fornecido, senão usar o nome original
-        const fileName = req.body.fileName || req.file.originalname;
-        
-        const params = {
-            Bucket: bucketName,
-            Key: fileName,
-            Body: req.file.buffer,
-            ContentType: req.file.mimetype,
-        };
-
-        const data = await s3.upload(params).promise();
-        
-        logInfo('Upload efetuado com sucesso', req, {
-            fileName: fileName,
-            bucketName: bucketName,
-            location: data.Location
-        });
-
-        res.status(200).json({
-            message: 'Arquivo enviado com sucesso',
-            fileName: fileName,
-            location: data.Location,
-            etag: data.ETag
-        });
+        logInfo('Upload efetuado', req, data.Buckets);
     } catch (error) {
         logError("Erro ao efetuar upload", req, error);
-        res.status(500).json({ 
-            error: 'Erro ao fazer upload do arquivo', 
-            details: error.message 
-        });
     }
 });
 
@@ -569,198 +446,63 @@ app.post('/buckets/:bucketName/upload', upload.single('file'), async (req, res) 
  *     responses:
  *       200:
  *         description: Arquivo deletado com sucesso
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 message:
- *                   type: string
- *                 fileName:
- *                   type: string
- *                 bucketName:
- *                   type: string
- *       404:
- *         description: Arquivo não encontrado
- *       500:
- *         description: Erro interno do servidor
  */
 app.delete('/buckets/:bucketName/file/:fileName', async (req, res) => {
     try {
-        const { bucketName, fileName } = req.params;
-        
-        // Primeiro verifica se o objeto existe
-        const headParams = {
-            Bucket: bucketName,
-            Key: fileName
-        };
-
-        try {
-            await s3.headObject(headParams).promise();
-        } catch (headError) {
-            if (headError.code === 'NotFound') {
-                return res.status(404).json({ 
-                    error: 'Arquivo não encontrado',
-                    fileName: fileName,
-                    bucketName: bucketName
-                });
-            }
-            throw headError;
-        }
-
-        // Se chegou até aqui, o objeto existe, então pode deletar
-        const deleteParams = {
-            Bucket: bucketName,
-            Key: fileName
-        };
-
-        await s3.deleteObject(deleteParams).promise();
-        
-        logInfo('Objeto removido com sucesso', req, {
-            fileName: fileName,
-            bucketName: bucketName
-        });
-
-        res.status(200).json({
-            message: 'Arquivo deletado com sucesso',
-            fileName: fileName,
-            bucketName: bucketName
-        });
+        logInfo('Objeto removido', req, data.Buckets);
     } catch (error) {
         logError("Erro ao remover objeto", req, error);
-        res.status(500).json({ 
-            error: 'Erro ao deletar arquivo', 
-            details: error.message 
-        });
     }
 });
 
-//#region CRUD MySQL
-
 /**
  * @swagger
- * /mysql/testar-conexao:
- *   get:
- *     tags:
- *       - CRUD MySQL
- *     summary: Testa a conexão com o MySQL
+ * /init-db:
+ *   post:
+ *     summary: Cria o banco de dados e a tabela produto
  *     responses:
  *       200:
- *         description: Conexão bem-sucedida
- *       500:
- *         description: Erro na conexão
+ *         description: Banco de dados e tabela criados com sucesso
  */
-app.get('/mysql/testar-conexao', async (req, res) => {
-    try {
-        const connection = await pool.getConnection();
-        const [rows] = await connection.execute('SELECT 1 as test');
-        connection.release();
-        
-        logInfo('Conexão MySQL testada com sucesso', req);
-        res.status(200).json({ 
-            message: 'Conexão MySQL bem-sucedida',
-            test: rows[0]
-        });
-    } catch (error) {
-        logError('Erro ao testar conexão MySQL', req, error);
-        res.status(500).json({ 
-            error: 'Erro na conexão MySQL',
-            message: error.message 
-        });
-    }
+app.post('/init-db', async (req, res) => {
+  try {
+    const createDB = `CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`; USE \`${DB_NAME}\`;
+      CREATE TABLE IF NOT EXISTS produto (
+        Id INT AUTO_INCREMENT PRIMARY KEY,
+        Nome VARCHAR(255) NOT NULL,
+        Descricao VARCHAR(255) NOT NULL,
+        Preco DECIMAL(10,2) NOT NULL
+      );`;
+    await pool.query(createDB);
+    res.send('Banco de dados e tabela criados com sucesso.');
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /**
  * @swagger
  * /produtos:
  *   get:
- *     tags:
- *       - CRUD MySQL
  *     summary: Lista todos os produtos
  *     responses:
  *       200:
  *         description: Lista de produtos
  */
 app.get('/produtos', async (req, res) => {
-    try {
-        const [rows] = await pool.query('SELECT * FROM produto');
-        logInfo('Produtos listados com sucesso', req);
-        res.status(200).json(rows);
-    } catch (error) {
-        logError('Erro ao listar produtos', req, error);
-        res.status(500).json({ 
-            error: 'Erro ao listar produtos',
-            message: error.message 
-        });
-    }
-});
-
-/**
- * @swagger
- * /produtos:
- *   post:
- *     tags:
- *       - CRUD MySQL
- *     summary: Cria um novo produto
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - nome
- *               - descricao
- *               - preco
- *             properties:
- *               nome:
- *                 type: string
- *               descricao:
- *                 type: string
- *               preco:
- *                 type: number
- *     responses:
- *       201:
- *         description: Produto criado
- */
-app.post('/produtos', async (req, res) => {
-    const { nome, descricao, preco } = req.body;
-    
-    try {
-        // Validação básica
-        if (!nome || !descricao || !preco) {
-            return res.status(400).json({ 
-                error: 'Nome, descrição e preço são obrigatórios' 
-            });
-        }
-
-        const [result] = await pool.query(
-            'INSERT INTO produto (Nome, Descricao, Preco) VALUES (?, ?, ?)',
-            [nome, descricao, preco]
-        );
-        
-        logInfo('Produto criado com sucesso', req);
-        res.status(201).json({ 
-            id: result.insertId, 
-            nome, 
-            descricao, 
-            preco 
-        });
-    } catch (error) {
-        logError('Erro ao criar produto', req, error);
-        res.status(500).json({ 
-            error: 'Erro ao criar produto',
-            message: error.message 
-        });
-    }
+  try {
+    await pool.query(`USE \`${DB_NAME}\``);
+    const [rows] = await pool.query('SELECT * FROM produto');
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /**
  * @swagger
  * /produtos/{id}:
  *   get:
- *     tags:
- *       - CRUD MySQL
  *     summary: Busca um produto pelo ID
  *     parameters:
  *       - in: path
@@ -775,31 +517,61 @@ app.post('/produtos', async (req, res) => {
  *         description: Produto não encontrado
  */
 app.get('/produtos/:id', async (req, res) => {
-    try {
-        const [rows] = await pool.query('SELECT * FROM produto WHERE Id = ?', [req.params.id]);
-        
-        if (rows.length === 0) {
-            return res.status(404).json({ error: 'Produto não encontrado' });
-        }
-        
-        logInfo('Produto encontrado', req);
-        res.status(200).json(rows[0]);
-    } catch (error) {
-        logError('Erro ao buscar produto', req, error);
-        res.status(500).json({ 
-            error: 'Erro ao buscar produto',
-            message: error.message 
-        });
-    }
+  try {
+    await pool.query(`USE \`${DB_NAME}\``);
+    const [rows] = await pool.query('SELECT * FROM produto WHERE id = ?', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Produto não encontrado' });
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * @swagger
+ * /produtos:
+ *   post:
+ *     summary: Cria um novo produto
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - Nome
+ *               - Descricao
+ *               - Preco
+ *             properties:
+ *               Nome:
+ *                 type: string
+ *               Descricao:
+ *                 type: string
+ *               Preco:
+ *                 type: number
+ *     responses:
+ *       201:
+ *         description: Produto criado
+ */
+app.post('/produtos', async (req, res) => {
+  const { Nome, Descricao, Preco } = req.body;
+  try {
+    await pool.query(`USE \`${DB_NAME}\``);
+    const [result] = await pool.query(
+      'INSERT INTO produto (Nome, Descricao, Preco) VALUES (?, ?, ?)',
+      [Nome, Descricao, Preco]
+    );
+    res.status(201).json({ id: result.insertId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /**
  * @swagger
  * /produtos/{id}:
  *   put:
- *     tags:
- *       - CRUD MySQL
- *     summary: Atualiza um produto pelo ID
+ *     summary: Atualiza um produto
  *     parameters:
  *       - in: path
  *         name: id
@@ -812,12 +584,16 @@ app.get('/produtos/:id', async (req, res) => {
  *         application/json:
  *           schema:
  *             type: object
+ *             required:
+ *               - Nome
+ *               - Descricao
+ *               - Preco
  *             properties:
- *               nome:
+ *               Nome:
  *                 type: string
- *               descricao:
+ *               Descricao:
  *                 type: string
- *               preco:
+ *               Preco:
  *                 type: number
  *     responses:
  *       200:
@@ -826,41 +602,25 @@ app.get('/produtos/:id', async (req, res) => {
  *         description: Produto não encontrado
  */
 app.put('/produtos/:id', async (req, res) => {
-    const { nome, descricao, preco } = req.body;
-    
-    try {
-        const [result] = await pool.query(
-            'UPDATE produto SET Nome = ?, Descricao = ?, Preco = ? WHERE Id = ?',
-            [nome, descricao, preco, req.params.id]
-        );
-        
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ error: 'Produto não encontrado' });
-        }
-        
-        logInfo('Produto atualizado', req);
-        res.status(200).json({ 
-            id: req.params.id, 
-            nome, 
-            descricao, 
-            preco 
-        });
-    } catch (error) {
-        logError('Erro ao atualizar produto', req, error);
-        res.status(500).json({ 
-            error: 'Erro ao atualizar produto',
-            message: error.message 
-        });
-    }
+  const { Nome, Descricao, Preco } = req.body;
+  try {
+    await pool.query(`USE \`${DB_NAME}\``);
+    const [result] = await pool.query(
+      'UPDATE produto SET Nome = ?, Descricao = ?, Preco = ? WHERE Id = ?',
+      [Nome, Descricao, Preco, req.params.id]
+    );
+    if (result.affectedRows === 0) return res.status(404).json({ error: 'Produto não encontrado' });
+    res.json({ message: 'Produto atualizado com sucesso' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /**
  * @swagger
  * /produtos/{id}:
  *   delete:
- *     tags:
- *       - CRUD MySQL
- *     summary: Remove um produto pelo ID
+ *     summary: Deleta um produto
  *     parameters:
  *       - in: path
  *         name: id
@@ -869,49 +629,22 @@ app.put('/produtos/:id', async (req, res) => {
  *           type: integer
  *     responses:
  *       200:
- *         description: Produto removido
+ *         description: Produto deletado com sucesso
  *       404:
  *         description: Produto não encontrado
  */
 app.delete('/produtos/:id', async (req, res) => {
-    try {
-        const [result] = await pool.query('DELETE FROM produto WHERE Id = ?', [req.params.id]);
-        
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ error: 'Produto não encontrado' });
-        }
-        
-        logInfo('Produto removido', req);
-        res.status(200).json({ message: 'Produto removido com sucesso' });
-    } catch (error) {
-        logError('Erro ao remover produto', req, error);
-        res.status(500).json({ 
-            error: 'Erro ao remover produto',
-            message: error.message 
-        });
-    }
+  try {
+    await pool.query(`USE \`${DB_NAME}\``);
+    const [result] = await pool.query('DELETE FROM produto WHERE Id = ?', [req.params.id]);
+    if (result.affectedRows === 0) return res.status(404).json({ error: 'Produto não encontrado' });
+    res.json({ message: 'Produto deletado com sucesso' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
-
 //#endregion
 
-// Inicializar conexões e servidor
-async function startServer() {
-    try {
-        // Testar conexões na inicialização
-        await testMySQLConnection();
-        
-        // Inicializar Swagger
-        swaggerDocs(app);
-        
-        // Iniciar servidor
-        app.listen(3000, () => {
-            console.log('🚀 Servidor rodando na porta 3000');
-            console.log('📚 Documentação Swagger disponível em: http://localhost:3000/api-docs');
-        });
-    } catch (error) {
-        console.error('❌ Erro ao iniciar servidor:', error);
-        process.exit(1);
-    }
-}
 
-startServer();
+swaggerDocs(app);
+app.listen(3000, () => console.log('Servidor rodando na porta 3000'));
